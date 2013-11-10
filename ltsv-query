@@ -1,0 +1,73 @@
+#!/usr/bin/env perl
+# import LTSV files into mysql to query data with SQL
+use 5.10.0;
+use strict;
+use warnings;
+
+use lib::xi;
+
+# use sigtrap;
+
+use DBI;
+use DBD::mysql;
+use Test::mysqld;
+use Scalar::Util qw(looks_like_number);
+use File::Which qw(which);
+
+my $mysql_client = which('mysql') or die "mysql(1) not found.\n";
+my $mysqld = which('mysqld') or die "mysqld(1) not found.\n";
+
+@ARGV or die "usage: ltsv-query filename.ltsv\n";
+
+{
+    my $daemon = Test::mysqld->new(
+        my_conf => {
+            'skip-networking' => '',
+        },
+    ) or die "Test::mysqld does not run: $Test::mysqld::errstr";
+
+    my $dsn = $daemon->dsn(dbname => 'test');
+    say $dsn;
+    my $dbh = DBI->connect($dsn, undef, undef, {
+        RaiseError => 1,
+        PrintError => 0,
+        AutoCommit => 0,
+    });
+
+    my $first = 1;
+
+    # first row
+    my @keys;
+    my $sth;
+    my $i = 0;
+    while(my $ltsv = <>) {
+        chomp $ltsv;
+
+        if ($first) {
+            $first = 0;
+
+            @keys = map { (split /:/, $_, 2)[0] } split(/\t/, $ltsv);
+            $dbh->do(sprintf 'CREATE TABLE data (%s);',
+                join ', ',
+                    map { "`$_` " . (looks_like_number($_) ? 'DOUBLE' : 'VARCHAR(255)') } @keys
+            );
+
+            $sth = $dbh->prepare(sprintf 'INSERT INTO data VALUES(%s)', join ', ', map { '?' } @keys);
+        }
+
+        my %row = map { split /:/, $_, 2 } split(/\t/, $ltsv);
+        $sth->execute(@row{@keys});
+
+        $dbh->commit() if 0 == ($i++ % 100);
+    }
+
+    $sth->finish();
+    $dbh->commit();
+    $dbh->disconnect();
+
+    # run mysql console
+    my %opts = map { split /=/, $_, 2 } split /;/, ($dsn =~ /DBI:mysql:(.*)/)[0];
+    system($mysql_client, '-u', $opts{user}, '-D', $opts{dbname}, '-S', $opts{mysql_socket});
+}
+
+say 'finished.';
